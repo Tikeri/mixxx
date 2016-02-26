@@ -1,203 +1,283 @@
 function HerculesAir () {}
+// Hercules DJ Control Air Midi interface script for Mixxx Software
+// Original Author : rojaro
+// Author  : Tiger <tiger@braineed.org> / Tiger #Mixxx@irc.freenode.net
+// Version : 0.1.1
 
-HerculesAir.beatStepDeckA1 = 0
-HerculesAir.beatStepDeckA2 = 0x44
-HerculesAir.beatStepDeckB1 = 0
-HerculesAir.beatStepDeckB2 = 0x4C
+// Default channel of this device
+HerculesAir.defch = 0;
 
-HerculesAir.scratchEnable_alpha = 1.0/8
-HerculesAir.scratchEnable_beta = (1.0/8)/32
-HerculesAir.scratchEnable_intervalsPerRev = 128
-HerculesAir.scratchEnable_rpm = 33+1/3
+HerculesAir.LEDCmd = 0x90;
+HerculesAir.LEDOn = 0x7F;
+HerculesAir.LEDOff = 0x00;
 
-HerculesAir.shiftButtonPressed = false
-HerculesAir.enableSpinBack = false
+// Beat LEDs
+HerculesAir.beatStepLEDCtrls = {
+    "1":0x44,
+    "2":0x4C,
+    "3":0x44,
+    "4":0x4C
+};
 
-HerculesAir.wheel_multiplier = 0.4
+// Stores the current beat steps
+HerculesAir.beatSteps = [ 0, 0, 0, 0, 0 ];
+// Number of beat LEDs
+HerculesAir.beatStepsCnt = 3; // We count the 0 like in binary =)
 
-HerculesAir.init = function(id) {
-    HerculesAir.id = id;
+// Deck count (MAX)
+HerculesAir.deckCnt = 4;
 
-	// extinguish all LEDs
-    for (var i = 79; i<79; i++) {
-        midi.sendShortMsg(0x90, i, 0x00);
+// Scratch settings
+HerculesAir.scratchEnable_alpha = 1.0/8;
+HerculesAir.scratchEnable_beta = (1.0/8)/32;
+HerculesAir.scratchEnable_intervalsPerRev = 128;
+HerculesAir.scratchEnable_rpm = 33+1/3;
+
+HerculesAir.Magic = false;
+HerculesAir.switchDecks = false;
+
+HerculesAir.wheel_multiplier = 0.4;
+
+/*
+ * Initialize controller LEDs
+ */
+HerculesAir.initLEDs = function() {
+    for (var i = 0; i < 0x4F; i++) {
+        midi.sendShortMsg(0x90, i, HerculesAir.LEDOff);
     }
-	midi.sendShortMsg(0x90, 0x3B, 0x7f) // headset volume "-" button LED (always on)
-	midi.sendShortMsg(0x90, 0x3C, 0x7f) // headset volume "+" button LED (always on)
+};
 
-	if(engine.getValue("[Master]", "headMix") > 0.5) {
-		midi.sendShortMsg(0x90, 0x39, 0x7f) // headset "Mix" button LED
-	} else {
-		midi.sendShortMsg(0x90, 0x3A, 0x7f) // headset "Cue" button LED
-	}
-
-    // Set soft-takeover for all Sampler volumes
-    for (var i=engine.getValue("[Master]","num_samplers"); i>=1; i--) {
-        engine.softTakeover("[Sampler"+i+"]","pregain",true);
+/*
+ * Initialize beat progress LEDs and connect them
+ * @decks :
+ * 2 -> Deck1 & Deck2
+ * 4 -> Deck3 & Deck4
+ */
+HerculesAir.initBeatProgress = function(decks) {
+    for( var i = 1; i <= HerculesAir.deckCnt; i++) {
+        if( (decks == 2 && i > decks) || (decks == 4 && i <= decks/2) ) {
+            var disco = true;
+        } else {
+            var disco = undefined;
+        }
+        
+        engine.connectControl("[Channel"+i+"]",
+                              "beat_active",
+                              "HerculesAir.beatProgressDeck",
+                              (disco == undefined ? undefined : disco)
+                             );
+        engine.connectControl("[Channel"+i+"]",
+                              "play",
+                              "HerculesAir.playDeck",
+                              (disco == undefined ? undefined : disco)
+                             );
     }
-    // Set soft-takeover for all applicable Deck controls
-    for (var i=engine.getValue("[Master]","num_decks"); i>=1; i--) {
-        engine.softTakeover("[Channel"+i+"]","volume",true);
-        engine.softTakeover("[Channel"+i+"]","filterHigh",true);
-        engine.softTakeover("[Channel"+i+"]","filterMid",true);
-        engine.softTakeover("[Channel"+i+"]","filterLow",true);
+};
+
+/*
+ * Reset/Initialize the beat LEDs VU-Meters
+ * connectControled
+ */
+HerculesAir.playDeck = function(value, group, control) {
+    if(engine.getValue(group, control) == 0) {
+        for(var i = 0; i <= HerculesAir.beatStepsCnt; i++) {
+            HerculesAir.beatSteps[script.deckFromGroup(group)] = 0; // Reset the beat LEDs
+            midi.sendShortMsg(0x90, HerculesAir.beatStepLEDCtrls[script.deckFromGroup(group)]+i, HerculesAir.LEDOff);
+        }
     }
+}
 
-    engine.softTakeover("[Master]","crossfader",true);
-
-	engine.connectControl("[Channel1]", "beat_active", "HerculesAir.beatProgressDeckA")
-	engine.connectControl("[Channel1]", "play", "HerculesAir.playDeckA")
-
-	engine.connectControl("[Channel2]", "beat_active", "HerculesAir.beatProgressDeckB")
-	engine.connectControl("[Channel2]", "play", "HerculesAir.playDeckB")
+/*
+ * Show the beat progression via LEDs VU-Meters labelled A & B
+ * connectControled
+ */
+HerculesAir.beatProgressDeck = function(value, group, control) {
+    var deck = script.deckFromGroup(group);
     
-    print ("Hercules DJ Controll AIR: "+id+" initialized.");
+    if(engine.getValue(group, control) == 1) {
+        midi.sendShortMsg(HerculesAir.LEDCmd, HerculesAir.beatStepLEDCtrls[deck]+HerculesAir.beatSteps[deck], HerculesAir.LEDOff);
+        
+        if(HerculesAir.beatSteps[deck] >= HerculesAir.beatStepsCnt) {
+            HerculesAir.beatSteps[deck] = 0;
+        } else {
+            HerculesAir.beatSteps[deck]++;
+        }
+        
+        midi.sendShortMsg(HerculesAir.LEDCmd, HerculesAir.beatStepLEDCtrls[deck]+HerculesAir.beatSteps[deck], HerculesAir.LEDOn);
+    }
 }
 
-HerculesAir.shutdown = function() {
-	HerculesAir.resetLEDs()
+/*
+ * Switch between Decks A & B and Decks C & D
+ */
+HerculesAir.switchDecksMode = function(midino, control, value, status, group) {
+    if( value == 0x7F ) {
+        HerculesAir.switchDecks ^= true;
+        midi.sendShortMsg(HerculesAir.LEDCmd | HerculesAir.defch,
+                          control,
+                          (HerculesAir.switchDecks == true ? HerculesAir.LEDOn : HerculesAir.LEDOff)
+                         );
+        HerculesAir.initBeatProgress( (HerculesAir.switchDecks == true ? 4 : 2) );
+    }
 }
 
-/* -------------------------------------------------------------------------- */
+/*
+ * Handles the head{Volume/Gain}
+ * connectControled
+ */
+HerculesAir.headVol = function(value, group, control) {
+    var ratio = 1/10; // Built-in controller audio device, 10 steps for head output volume
+    
+    var grp = "[Master]";
+    var para = "headGain";
+    
+    var val = engine.getParameter(grp, para);
+    
+    // Head Volumes button send 0x7F when pushed and 0x00 when released, so we do stuff above once only
+    if( control == 0x7F ) {
+        if( group == 0x3B) { // Button "-" => Reduce headGain
+            val -= ratio;
+        }
+        if( group == 0x3C) { // Button "+" => Increase headGain
+            val += ratio;
+        }
+        engine.setParameter(grp, para, (val > 1 ? 1 : val) );
+    }
+};
 
-HerculesAir.playDeckA = function() {
-	if(engine.getValue("[Channel1]", "play") == 0) {
-		// midi.sendShortMsg(0x90, HerculesAir.beatStepDeckA1, 0x00)
-		HerculesAir.beatStepDeckA1 = 0x00
-		HerculesAir.beatStepDeckA2 = 0x44
-	}
-}
-
-HerculesAir.playDeckB = function() {
-	if(engine.getValue("[Channel2]", "play") == 0) {
-		// midi.sendShortMsg(0x90, HerculesAir.beatStepDeckB1, 0x00)
-		HerculesAir.beatStepDeckB1 = 0x00
-		HerculesAir.beatStepDeckB2 = 0x4C
-	}
-}
-
-HerculesAir.beatProgressDeckA = function() {
-	if(engine.getValue("[Channel1]", "beat_active") == 1) {
-		if(HerculesAir.beatStepDeckA1 != 0x00) {
-			midi.sendShortMsg(0x90, HerculesAir.beatStepDeckA1, 0x00)
-		}
-
-		HerculesAir.beatStepDeckA1 = HerculesAir.beatStepDeckA2
-
-		midi.sendShortMsg(0x90, HerculesAir.beatStepDeckA2, 0x7f)
-		if(HerculesAir.beatStepDeckA2 < 0x47) {
-			HerculesAir.beatStepDeckA2++
-		} else {
-			HerculesAir.beatStepDeckA2 = 0x44
-		}
-	}
-}
-
-HerculesAir.beatProgressDeckB = function() {
-	if(engine.getValue("[Channel2]", "beat_active") == 1) {
-		if(HerculesAir.beatStepDeckB1 != 0) {
-			midi.sendShortMsg(0x90, HerculesAir.beatStepDeckB1, 0x00)
-		}
-
-		HerculesAir.beatStepDeckB1 = HerculesAir.beatStepDeckB2
-
-		midi.sendShortMsg(0x90, HerculesAir.beatStepDeckB2, 0x7f)
-		if(HerculesAir.beatStepDeckB2 < 0x4F) {
-			HerculesAir.beatStepDeckB2++
-		} else {
-			HerculesAir.beatStepDeckB2 = 0x4C
-		}
-	}
-}
-
+/*
+ * headCue mode 
+ */
 HerculesAir.headCue = function(midino, control, value, status, group) {
-	if(engine.getValue(group, "headMix") == 0) {
-		engine.setValue(group, "headMix", -1.0);
-		midi.sendShortMsg(0x90, 0x39, 0x00);
-		midi.sendShortMsg(0x90, 0x3A, 0x7f);
-	}
+    if(engine.getValue(group, "headMix") == 0) {
+        engine.setValue(group, "headMix", -1.0);
+        midi.sendShortMsg(0x90, 0x39, 0x00);
+        midi.sendShortMsg(0x90, 0x3A, 0x7f);
+    }
 };
 
+/*
+ * headMix mode
+ */
 HerculesAir.headMix = function(midino, control, value, status, group) {
-	if(engine.getValue(group, "headMix") != 1) {
-		engine.setValue(group, "headMix", 0);
-		midi.sendShortMsg(0x90, 0x39, 0x7f);
-		midi.sendShortMsg(0x90, 0x3A, 0x00);
-	}
+    if(engine.getValue(group, "headMix") != 1) {
+        engine.setValue(group, "headMix", 0);
+        midi.sendShortMsg(0x90, 0x39, 0x7f);
+        midi.sendShortMsg(0x90, 0x3A, 0x00);
+    }
 };
 
+/*
+ * Special function called when "Magic" (shift) button is pressed :
+ * Load the selected track into the desired sampler (Sample->Pads)
+ */
 HerculesAir.sampler = function(midino, control, value, status, group) {
-	if(value != 0x00) {
-		if(HerculesAir.shiftButtonPressed) {
-			engine.setValue(group, "LoadSelectedTrack", 1)
-		} else if(engine.getValue(group, "play") == 0) {
-			engine.setValue(group, "start_play", 1)
-		} else {
-			engine.setValue(group, "play", 0)
-		}
-	}
+    if(value != 0x00) {
+        if(HerculesAir.Magic) {
+                engine.setValue(group, "LoadSelectedTrack", 1)
+        } else if(engine.getValue(group, "play") == 0) {
+                engine.setValue(group, "start_play", 1)
+        } else {
+                engine.setValue(group, "play", 0)
+        }
+    }
 }
 
+/*
+ * When track not playing, use Jogs to navigate trough the song (like ZIP)
+ */
 HerculesAir.wheelTurn = function(midino, control, value, status, group) {
 
     var deck = script.deckFromGroup(group);
+    deck = (HerculesAir.switchDecks == true ? deck+2 : deck);
+    
+    newgroup = "[Channel"+deck+"]";
+    
     var newValue=(value==0x01 ? 1: -1);
     // See if we're scratching. If not, do wheel jog.
     if (!engine.isScratching(deck)) {
-        engine.setValue(group, "jog", newValue* HerculesAir.wheel_multiplier);
+        engine.setValue(newgroup, "jog", newValue* HerculesAir.wheel_multiplier);
         return;
     }
 
-    if (engine.getValue(group, "play") == 0) {
-		var new_position = engine.getValue(group,"playposition") + 0.008 * (value == 0x01 ? 1 : -1)
-		if(new_position<0) new_position = 0
-		if(new_position>1) new_position = 1
-		engine.setValue(group,"playposition",new_position);
+    if (engine.getValue(newgroup, "play") == 0) {
+        var new_position = engine.getValue(newgroup,"playposition") + 0.008 * (value == 0x01 ? 1 : -1);
+        if(new_position < 0) new_position = 0;
+        if(new_position > 1) new_position = 1;
+        engine.setValue(newgroup,"playposition", new_position);
     } else {
         // Register the movement
-        engine.scratchTick(deck,newValue);
+        engine.scratchTick(deck, newValue);
     }
 
 }
 
+/*
+ * Function called when using wheels as Jogs
+ */
 HerculesAir.jog = function(midino, control, value, status, group) {
-    if (HerculesAir.enableSpinBack) {
-        HerculesAir.wheelTurn(midino, control, value, status, group);
-    } else {
-        var deck = script.deckFromGroup(group);
-        var newValue = (value==0x01 ? 1:-1);
-        engine.setValue(group, "jog", newValue* HerculesAir.wheel_multiplier);
-    }
+    var deck = script.deckFromGroup(group);
+    deck = (HerculesAir.switchDecks == true ? deck+2 : deck);
+    
+    var newgroup = "[Channel"+deck+"]";
+    
+    var newValue = (value == 0x01 ? 1:-1);
+    engine.setValue(newgroup, "jog", newValue* HerculesAir.wheel_multiplier);
 }
 
+/*
+ * Scratch function used when Jogs/Wheel are enabled (pushed down)
+ */
 HerculesAir.scratch_enable = function(midino, control, value, status, group) {
     var deck = script.deckFromGroup(group);
-	if(value == 0x7f) {
-		engine.scratchEnable(
-			deck,
-			HerculesAir.scratchEnable_intervalsPerRev,
-			HerculesAir.scratchEnable_rpm,
-			HerculesAir.scratchEnable_alpha,
-			HerculesAir.scratchEnable_beta
-		);
-	} else {
-		engine.scratchDisable(deck);
-	}
+    deck = (HerculesAir.switchDecks == true ? deck+2 : deck);
+    
+    if(value == 0x7f) {
+        engine.scratchEnable(
+                deck,
+                HerculesAir.scratchEnable_intervalsPerRev,
+                HerculesAir.scratchEnable_rpm,
+                HerculesAir.scratchEnable_alpha,
+                HerculesAir.scratchEnable_beta
+        );
+    } else {
+        engine.scratchDisable(deck);
+    }
 }
 
+/*
+ * Magic Button used a "shift" function
+ */
 HerculesAir.shift = function(midino, control, value, status, group) {
-	HerculesAir.shiftButtonPressed = (value == 0x7f);
+    HerculesAir.Magic = (value == 0x7f);
     midi.sendShortMsg(status, control, value);
 }
 
-
-HerculesAir.spinback= function(midino, control, value, status,group) {
-    if (value==0x7f) {
-        HerculesAir.enableSpinBack = !HerculesAir.enableSpinBack;
-        if (HerculesAir.enableSpinBack) {
-            midi.sendShortMsg(status,control, 0x7f);
-        } else {
-            midi.sendShortMsg(status,control, 0x0);
-        }
+/*** Constructor ***/
+HerculesAir.init = function(id) {
+    HerculesAir.initLEDs();
+    HerculesAir.initBeatProgress(2);
+    
+    // headGain always higher than 50% from the built-in soundcard
+    // Here's some dmesg output :
+    // usb_audio: Warning! Unlikely big volume range (=12160), cval->res is probably wrong.
+    // usb_audio: [3] FU [PCM Playback Volume] ch = 4, val = -9088/3072/1
+    engine.setParameter("[Master]", "headGain", 0.7);
+    // Now we can connect the control that have approx real value of the volume set physically on
+    // the device
+    engine.connectControl("[Master]","headGain", "HerculesAir.headVol");
+    
+    midi.sendShortMsg(0x90, 0x3B, 0x7F) // headset volume "-" button LED (always on)
+    midi.sendShortMsg(0x90, 0x3C, 0x7F) // headset volume "+" button LED (always on)
+    
+    if(engine.getValue("[Master]", "headMix") > 0.5) {
+            midi.sendShortMsg(0x90, 0x39, 0x7F) // headset "Mix" button LED
+    } else {
+            midi.sendShortMsg(0x90, 0x3A, 0x7F) // headset "Cue" button LED
     }
+}
+
+/*** Destructor ***/
+HerculesAir.shutdown = function() {
+	HerculesAir.initLEDs()
 }
